@@ -1,10 +1,30 @@
 import SwiftUI
 
+/// Claude Code's own `/usage` reports percent *used*. Showing percent *left*
+/// next to it reads as a mismatch even though it is the same number, so the
+/// mode is explicit in the UI and switchable from the right-click menu.
+enum DisplayMode: String {
+    case left, used
+
+    var suffix: String { rawValue }
+    var toggled: DisplayMode { self == .left ? .used : .left }
+}
+
 @MainActor
 final class UsageStore: ObservableObject {
     @Published var usage: Usage?
     @Published var errorText: String?
     @Published var loading = false
+    @Published var mode: DisplayMode = .left {
+        didSet { UserDefaults.standard.set(mode.rawValue, forKey: "displayMode") }
+    }
+
+    init() {
+        if let raw = UserDefaults.standard.string(forKey: "displayMode"),
+           let m = DisplayMode(rawValue: raw) {
+            mode = m
+        }
+    }
 
     private var timer: Timer?
 
@@ -53,8 +73,14 @@ func meterColor(remaining: Int) -> Color {
 
 struct MeterView: View {
     let limit: Limit
+    let mode: DisplayMode
     /// Ticks once a second so the countdown stays honest.
     let now: Date
+
+    /// The number shown. The bar always fills in the same direction as it.
+    private var value: Int { mode == .left ? limit.remaining : limit.percent }
+
+    private var color: Color { meterColor(remaining: limit.remaining) }
 
     var body: some View {
         HStack(spacing: 6) {
@@ -66,15 +92,15 @@ struct MeterView: View {
                 Capsule()
                     .fill(Color.primary.opacity(0.14))
                 Capsule()
-                    .fill(meterColor(remaining: limit.remaining))
-                    .frame(width: max(2, 46 * CGFloat(limit.remaining) / 100))
+                    .fill(color)
+                    .frame(width: max(2, 46 * CGFloat(value) / 100))
             }
             .frame(width: 46, height: 5)
 
-            Text("\(limit.remaining)%")
+            Text("\(value)%")
                 .font(.system(size: 11, weight: .semibold, design: .rounded))
                 .monospacedDigit()
-                .foregroundStyle(meterColor(remaining: limit.remaining))
+                .foregroundStyle(color)
 
             if let r = limit.resetsAt {
                 Text(countdown(to: r, now: now))
@@ -87,7 +113,7 @@ struct MeterView: View {
     }
 
     private var tooltip: String {
-        var s = "\(limit.label): \(limit.remaining)% left (\(limit.percent)% used)"
+        var s = "\(limit.label): \(limit.remaining)% left, \(limit.percent)% used"
         if let r = limit.resetsAt {
             s += ", resets \(r.formatted(date: .abbreviated, time: .shortened))"
         }
@@ -103,14 +129,14 @@ struct BarView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Text("claude")
+            Text("claude \(store.mode.suffix)")
                 .font(.system(size: 10, weight: .bold, design: .rounded))
                 .foregroundStyle(.secondary)
                 .opacity(store.loading ? 0.45 : 1)
 
             if let usage = store.usage {
                 ForEach(usage.limits) { limit in
-                    MeterView(limit: limit, now: now)
+                    MeterView(limit: limit, mode: store.mode, now: now)
                 }
             } else if let err = store.errorText {
                 Text(err)

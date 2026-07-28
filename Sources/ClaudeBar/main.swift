@@ -9,7 +9,7 @@ final class BarPanel: NSPanel {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     private let store = UsageStore()
     private var panel: BarPanel!
 
@@ -60,6 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func buildMenu() -> NSMenu {
         let menu = NSMenu()
+        menu.delegate = self
+        menu.addItem(withTitle: "Show percent used", action: #selector(toggleMode), keyEquivalent: "")
+            .target = self
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Refresh now", action: #selector(refresh), keyEquivalent: "r")
             .target = self
         menu.addItem(withTitle: "Reset position", action: #selector(resetPosition), keyEquivalent: "")
@@ -67,6 +71,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit ClaudeBar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         return menu
+    }
+
+    @objc private func toggleMode() {
+        store.mode = store.mode.toggled
+        resizeToFit()
+    }
+
+    /// Keep the toggle's title describing what it will switch *to*.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.item(at: 0)?.title = store.mode == .left ? "Show percent used" : "Show percent left"
     }
 
     @objc private func refresh() { store.refresh() }
