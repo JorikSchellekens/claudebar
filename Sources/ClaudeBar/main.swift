@@ -11,9 +11,11 @@ final class BarPanel: NSPanel {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     private let store = UsageStore()
+    private let notifier = Notifier()
     private var panel: BarPanel!
 
-    private let originKey = "barOrigin"
+    private var lastMoveAt: Date?
+    private var mouseUpMonitors: [Any] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let hosting = NSHostingView(rootView: BarView(store: store))
@@ -50,11 +52,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self, selector: #selector(woke),
             name: NSWorkspace.didWakeNotification, object: nil)
 
+        // Snap after a drag ends. Mouse-up needs both monitors: the global one
+        // misses events delivered to our own window, the local one misses the
+        // rest.
+        let global = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] _ in
+            Task { @MainActor in self?.snapIfJustDragged() }
+        }
+        let local = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] event in
+            Task { @MainActor in self?.snapIfJustDragged() }
+            return event
+        }
+        mouseUpMonitors = [global, local].compactMap { $0 }
+
+        notifier.prepare()
+        store.onUsage = { [weak self] usage in
+            self?.notifier.evaluate(usage)
+        }
         store.start()
 
-        // Content width changes with the number of meters returned.
+        // Content width changes with the number of meters returned, and the
+        // bar follows the display the mouse is on.
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.resizeToFit() }
+            Task { @MainActor in
+                self?.resizeToFit()
+                self?.followMouseScreen()
+            }
         }
     }
 
@@ -88,7 +110,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc private func woke() { store.refresh() }
 
     @objc private func resetPosition() {
-        UserDefaults.standard.removeObject(forKey: originKey)
+        UserDefaults.standard.removeObject(forKey: xFractionKey)
+        UserDefaults.standard.removeObject(forKey: yOffsetKey)
         placeWindow()
     }
 
@@ -107,29 +130,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         clampToScreen()
     }
 
+    /// Position is stored relative to the screen - an x fraction of the visible
+    /// width and a height above its bottom edge - so it survives a move to a
+    /// display of a different size.
+    private let xFractionKey = "posXFraction"
+    private let yOffsetKey = "posYOffset"
+
+    private let bottomMargin: CGFloat = 6
+    private let snapX: CGFloat = 60
+    private let snapY: CGFloat = 44
+
+    private func currentScreen() -> NSScreen? {
+        let mouse = NSEvent.mouseLocation
+        return NSScreen.screens.first { $0.frame.contains(mouse) }
+            ?? panel.screen ?? NSScreen.main
+    }
+
     /// Default spot: bottom centre of the visible frame, which sits above the Dock.
-    private func placeWindow() {
-        guard let screen = NSScreen.main else { return }
+    private func placeWindow(on screen: NSScreen? = nil) {
+        guard let screen = screen ?? currentScreen() else { return }
         let v = screen.visibleFrame
         let size = panel.frame.size
 
-        if let saved = UserDefaults.standard.string(forKey: originKey) {
-            let point = NSPointFromString(saved)
-            if v.insetBy(dx: -20, dy: -20).contains(point) {
-                panel.setFrameOrigin(point)
-                clampToScreen()
-                return
-            }
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: xFractionKey) != nil {
+            let fraction = defaults.double(forKey: xFractionKey)
+            let yOffset = defaults.double(forKey: yOffsetKey)
+            panel.setFrameOrigin(NSPoint(
+                x: v.minX + fraction * (v.width - size.width),
+                y: v.minY + yOffset
+            ))
+        } else {
+            panel.setFrameOrigin(NSPoint(
+                x: v.midX - size.width / 2,
+                y: v.minY + bottomMargin
+            ))
         }
+        clampToScreen()
+    }
 
-        panel.setFrameOrigin(NSPoint(
-            x: v.midX - size.width / 2,
-            y: v.minY + 6
-        ))
+    /// Hop to whichever display the mouse is on, keeping the same relative spot.
+    private func followMouseScreen() {
+        guard let target = currentScreen(), target != panel.screen else { return }
+        placeWindow(on: target)
+    }
+
+    /// Magnetic pull back to bottom centre, so a nudged bar is easy to re-seat.
+    private func snapIfJustDragged() {
+        guard let moved = lastMoveAt, Date().timeIntervalSince(moved) < 1 else { return }
+        lastMoveAt = nil
+        guard let screen = panel.screen ?? currentScreen() else { return }
+
+        let v = screen.visibleFrame
+        let size = panel.frame.size
+        var origin = panel.frame.origin
+
+        let centreX = v.midX - size.width / 2
+        if abs(origin.x - centreX) < snapX { origin.x = centreX }
+
+        let restY = v.minY + bottomMargin
+        if abs(origin.y - restY) < snapY { origin.y = restY }
+
+        guard origin != panel.frame.origin else { return }
+        panel.animator().setFrameOrigin(origin)
+        savePosition(origin: origin, screen: screen)
     }
 
     private func clampToScreen() {
-        guard let screen = panel.screen ?? NSScreen.main else { return }
+        guard let screen = panel.screen ?? currentScreen() else { return }
         let v = screen.visibleFrame
         var f = panel.frame
         f.origin.x = min(max(f.origin.x, v.minX), v.maxX - f.width)
@@ -137,8 +205,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if f.origin != panel.frame.origin { panel.setFrameOrigin(f.origin) }
     }
 
+    private func savePosition(origin: NSPoint, screen: NSScreen) {
+        let v = screen.visibleFrame
+        let travel = v.width - panel.frame.width
+        let fraction = travel > 0 ? (origin.x - v.minX) / travel : 0.5
+        UserDefaults.standard.set(min(max(fraction, 0), 1), forKey: xFractionKey)
+        UserDefaults.standard.set(origin.y - v.minY, forKey: yOffsetKey)
+    }
+
     func windowDidMove(_ notification: Notification) {
-        UserDefaults.standard.set(NSStringFromPoint(panel.frame.origin), forKey: originKey)
+        lastMoveAt = Date()
+        guard let screen = panel.screen else { return }
+        savePosition(origin: panel.frame.origin, screen: screen)
     }
 }
 

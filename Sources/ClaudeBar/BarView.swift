@@ -17,23 +17,41 @@ final class UsageStore: ObservableObject {
         didSet { UserDefaults.standard.set(mode.rawValue, forKey: "displayMode") }
     }
 
+    private let cacheKey = "lastUsage"
+
     init() {
         if let raw = UserDefaults.standard.string(forKey: "displayMode"),
            let m = DisplayMode(rawValue: raw) {
             mode = m
         }
+        // Show the last known numbers immediately rather than an empty bar,
+        // which matters most on a restart into a rate limit.
+        if let data = UserDefaults.standard.data(forKey: cacheKey),
+           let cached = try? JSONDecoder().decode(Usage.self, from: data) {
+            usage = cached
+        }
     }
+
+    /// Called after every successful fetch, so the threshold notifier can look
+    /// at the same data the bar just rendered.
+    var onUsage: ((Usage) -> Void)?
 
     private var timer: Timer?
 
-    /// The API buckets usage over hours and days, so a tight poll buys nothing.
-    private let interval: TimeInterval = 60
+    /// The windows are measured in hours and days, and the endpoint rate-limits,
+    /// so a tight poll buys nothing and costs 429s.
+    private let interval: TimeInterval = 300
+    private let maxBackoff: TimeInterval = 1800
+    private var backoff: TimeInterval = 300
+
+    /// True once the displayed numbers are old enough to distrust.
+    var stale: Bool {
+        guard let usage else { return false }
+        return Date().timeIntervalSince(usage.fetchedAt) > interval * 3
+    }
 
     func start() {
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
-        }
     }
 
     func refresh() {
@@ -41,12 +59,33 @@ final class UsageStore: ObservableObject {
         loading = true
         Task { @MainActor in
             do {
-                usage = try await UsageClient.fetch()
+                let fresh = try await UsageClient.fetch()
+                usage = fresh
                 errorText = nil
+                backoff = interval
+                if let data = try? JSONEncoder().encode(fresh) {
+                    UserDefaults.standard.set(data, forKey: cacheKey)
+                }
+                onUsage?(fresh)
             } catch {
+                // Keep the last good numbers on screen; a failed poll is not a
+                // reason to blank the bar. `stale` marks them if it persists.
                 errorText = (error as? LocalizedError)?.errorDescription ?? "offline"
+                if case UsageError.rateLimited(let retryAfter) = error, let retryAfter {
+                    backoff = min(max(retryAfter, interval), maxBackoff)
+                } else {
+                    backoff = min(backoff * 2, maxBackoff)
+                }
             }
             loading = false
+            scheduleNext(errorText == nil ? interval : backoff)
+        }
+    }
+
+    private func scheduleNext(_ delay: TimeInterval) {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
         }
     }
 }
@@ -122,17 +161,41 @@ struct MeterView: View {
 struct BarView: View {
     @ObservedObject var store: UsageStore
     @State private var now = Date()
+    @State private var hovering = false
 
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    /// Recede while there is nothing to report, surface as usage climbs.
+    /// Hovering always brings it back to full.
+    private var restingOpacity: Double {
+        if hovering { return 1 }
+        guard let usage = store.usage else { return 1 }
+        let worst = usage.limits.map(\.percent).max() ?? 0
+        switch worst {
+        case ..<50: return 0.4
+        case 80...: return 1
+        default: return 0.4 + Double(worst - 50) / 30 * 0.6
+        }
+    }
+
+    private var staleHelp: String {
+        guard let usage = store.usage else { return "ClaudeBar" }
+        var s = "updated \(usage.fetchedAt.formatted(date: .omitted, time: .standard))"
+        if let err = store.errorText { s += " - last poll failed: \(err)" }
+        return s
+    }
 
     var body: some View {
         HStack(spacing: 12) {
             Text("claude")
                 .font(.system(size: 10, weight: .bold, design: .rounded))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(store.stale ? Color(red: 0.97, green: 0.68, blue: 0.20) : .secondary)
                 .opacity(store.loading ? 0.45 : 1)
+                .help(staleHelp)
 
             if let usage = store.usage {
+                // Last good numbers stay up through a failed poll; the label
+                // turns amber once they are old enough to distrust.
                 ForEach(usage.limits) { limit in
                     MeterView(limit: limit, mode: store.mode, now: now)
                 }
@@ -151,7 +214,10 @@ struct BarView: View {
         .background(.ultraThinMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(Color.primary.opacity(0.10), lineWidth: 1))
         .fixedSize()
+        .opacity(restingOpacity)
+        .animation(.easeInOut(duration: 0.35), value: restingOpacity)
         .onReceive(tick) { now = $0 }
+        .onHover { hovering = $0 }
         .onTapGesture { store.refresh() }
     }
 }

@@ -1,7 +1,7 @@
 import Foundation
 
 /// One usage meter as reported by the API.
-struct Limit: Identifiable, Equatable {
+struct Limit: Identifiable, Equatable, Codable {
     let kind: String        // "session", "weekly_all", "weekly_scoped"
     let percent: Int        // percent *used*
     let severity: String    // "normal", "warning", ...
@@ -23,19 +23,21 @@ struct Limit: Identifiable, Equatable {
     var remaining: Int { max(0, 100 - percent) }
 }
 
-struct Usage: Equatable {
+struct Usage: Equatable, Codable {
     let limits: [Limit]
     let fetchedAt: Date
 }
 
 enum UsageError: Error, LocalizedError {
     case unauthorized
+    case rateLimited(retryAfter: TimeInterval?)
     case http(Int)
     case malformed
 
     var errorDescription: String? {
         switch self {
         case .unauthorized: return "re-auth needed"
+        case .rateLimited: return "rate limited"
         case .http(let c): return "HTTP \(c)"
         case .malformed: return "bad response"
         }
@@ -67,10 +69,18 @@ enum UsageClient {
 
         let (data, response) = try await URLSession.shared.data(for: req)
         guard let http = response as? HTTPURLResponse else { throw UsageError.malformed }
-        guard http.statusCode == 200 else {
-            throw http.statusCode == 401 ? UsageError.unauthorized : UsageError.http(http.statusCode)
+
+        switch http.statusCode {
+        case 200:
+            return try parse(data)
+        case 401:
+            throw UsageError.unauthorized
+        case 429:
+            let retry = (http.value(forHTTPHeaderField: "Retry-After")).flatMap(TimeInterval.init)
+            throw UsageError.rateLimited(retryAfter: retry)
+        default:
+            throw UsageError.http(http.statusCode)
         }
-        return try parse(data)
     }
 
     /// The `limits` array is the API's own presentation model, so we lean on it
