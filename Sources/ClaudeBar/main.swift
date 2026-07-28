@@ -8,6 +8,50 @@ final class BarPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+/// Mouse handling has to live here rather than in SwiftUI gestures.
+/// `isMovableByWindowBackground` consumes `mouseDown` to run its own drag loop,
+/// so any `onTapGesture` on the content never fires. Dragging is done by hand
+/// instead, and a press that moves the window nowhere is treated as a click.
+final class BarHostingView<Content: View>: NSHostingView<Content> {
+    var onClick: (() -> Void)?
+    var onDoubleClick: (() -> Void)?
+
+    /// `performDrag` runs its own event loop and swallows the mouse-up, which
+    /// breaks AppKit's click-count chain - a second click still arrives with
+    /// `clickCount == 1`. So pair the clicks by hand.
+    private var lastClickAt: TimeInterval = 0
+    private var lastClickPoint: NSPoint = .zero
+
+    override func mouseDown(with event: NSEvent) {
+        let point = NSEvent.mouseLocation
+        let isPair = event.timestamp - lastClickAt < NSEvent.doubleClickInterval
+            && hypot(point.x - lastClickPoint.x, point.y - lastClickPoint.y) < 8
+
+        if isPair {
+            lastClickAt = 0
+            onDoubleClick?()
+            return
+        }
+
+        lastClickAt = event.timestamp
+        lastClickPoint = point
+
+        guard let window else { return }
+        let before = window.frame.origin
+        // Blocks until mouse-up, running the drag if the pointer moves.
+        window.performDrag(with: event)
+        let after = window.frame.origin
+
+        if abs(after.x - before.x) < 3, abs(after.y - before.y) < 3 {
+            onClick?()
+        } else {
+            // A real drag ended somewhere else; do not let the next click
+            // anywhere nearby read as the second half of a double-click.
+            lastClickAt = 0
+        }
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     private let store = UsageStore()
@@ -16,8 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let hosting = NSHostingView(rootView: BarView(store: store))
+        let hosting = BarHostingView(rootView: BarView(store: store))
         hosting.menu = buildMenu()
+        hosting.onClick = { [weak self] in self?.store.manualRefresh() }
+        hosting.onDoubleClick = { [weak self] in self?.resetPositionAnimated() }
 
         panel = BarPanel(
             contentRect: NSRect(x: 0, y: 0, width: 400, height: 30),
@@ -31,7 +77,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.level = .statusBar
-        panel.isMovableByWindowBackground = true
+        // BarHostingView drives the drag itself, via performDrag.
+        panel.isMovableByWindowBackground = false
+        panel.acceptsMouseMovedEvents = true
         panel.hidesOnDeactivate = false
         panel.isFloatingPanel = true
         // Present on every space, and over full-screen apps.
@@ -170,10 +218,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard let screen = currentScreen() else { return }
         let v = screen.visibleFrame
         let target = NSPoint(x: v.midX - panel.frame.width / 2, y: v.minY + bottomMargin)
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.22
-            panel.animator().setFrameOrigin(target)
-        }
+        // Not `animator().setFrameOrigin` - NSWindow only animates `frame` and
+        // `alphaValue` through the proxy, so that call silently does nothing.
+        panel.setFrame(NSRect(origin: target, size: panel.frame.size),
+                       display: true, animate: true)
     }
 
     private func clampToScreen() {

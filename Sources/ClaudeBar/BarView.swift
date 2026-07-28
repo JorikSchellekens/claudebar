@@ -188,10 +188,12 @@ struct BarView: View {
         if hovering { return 1 }
         guard let usage = store.usage else { return 1 }
         let worst = usage.limits.map(\.percent).max() ?? 0
+        // Floor is legibility, not invisibility - the bar still has to be
+        // readable at a glance when everything is fine.
         switch worst {
-        case ..<50: return 0.4
+        case ..<50: return 0.6
         case 80...: return 1
-        default: return 0.4 + Double(worst - 50) / 30 * 0.6
+        default: return 0.6 + Double(worst - 50) / 30 * 0.4
         }
     }
 
@@ -235,9 +237,6 @@ struct BarView: View {
         .animation(.easeInOut(duration: 0.35), value: restingOpacity)
         .onReceive(tick) { now = $0 }
         .onHover { hovering = $0 }
-        // Double-click must be declared first, or the single-click gesture
-        // swallows it.
-        .onTapGesture(count: 2) { store.onResetPosition?() }
-        .onTapGesture { store.manualRefresh() }
+        // Clicks are handled by BarHostingView, not here - see the note there.
     }
 }
