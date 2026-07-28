@@ -46,10 +46,20 @@ enum UsageClient {
     private static let endpoint = URL(string: "https://api.anthropic.com/api/oauth/usage")!
 
     static func fetch() async throws -> Usage {
-        let creds = try Credentials.load()
+        do {
+            return try await attempt()
+        } catch UsageError.unauthorized {
+            // The cached token went stale early. Drop it and try the source once.
+            Credentials.invalidate()
+            return try await attempt()
+        }
+    }
+
+    private static func attempt() async throws -> Usage {
+        let token = try Credentials.token()
 
         var req = URLRequest(url: endpoint)
-        req.setValue("Bearer \(creds.accessToken)", forHTTPHeaderField: "Authorization")
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         req.setValue("claudebar/1.0", forHTTPHeaderField: "User-Agent")
         req.timeoutInterval = 20

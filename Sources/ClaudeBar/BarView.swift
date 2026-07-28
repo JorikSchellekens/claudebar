@@ -15,7 +15,7 @@ final class UsageStore: ObservableObject {
     @Published var usage: Usage?
     @Published var errorText: String?
     @Published var loading = false
-    @Published var mode: DisplayMode = .left {
+    @Published var mode: DisplayMode = .used {
         didSet { UserDefaults.standard.set(mode.rawValue, forKey: "displayMode") }
     }
 

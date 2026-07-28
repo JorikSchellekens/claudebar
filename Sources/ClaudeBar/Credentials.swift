@@ -1,25 +1,33 @@
 import Foundation
 import Security
 
-/// Reads the OAuth access token Claude Code stores for the logged-in account.
+/// Supplies the bearer token for the usage endpoint.
 ///
-/// Claude Code keeps it in the login keychain under the generic-password service
-/// "Claude Code-credentials". Some installs (and Linux-style setups) instead keep
-/// a plain file at ~/.claude/.credentials.json, so we fall back to that.
+/// Source order, cheapest and least intrusive first:
 ///
-/// We never refresh the token ourselves - refreshing would rotate it out from
-/// under Claude Code. When it expires we just re-read; Claude Code refreshes it
-/// on its own and we pick up the new value.
+///  1. ClaudeBar's own keychain item. Written by `set-token.sh` from
+///     `claude setup-token`, with ClaudeBar on its ACL, so reading it never
+///     prompts. This is the only source that stays quiet indefinitely.
+///  2. `~/.claude/.credentials.json`, if a non-keychain install wrote one.
+///  3. Claude Code's own keychain item. This works with no setup, but Claude
+///     Code rotates that token about hourly and rewrites the item each time,
+///     which resets its ACL and makes macOS ask again.
+///
+/// Whatever the source, the result is cached in memory until it expires, so a
+/// 60-second poll does not mean a 60-second keychain hit.
+///
+/// ClaudeBar never refreshes or rewrites Claude Code's token - rotating it
+/// would pull it out from under Claude Code.
 enum Credentials {
-    struct OAuth: Decodable {
-        let accessToken: String
-        let expiresAt: Double?
-        let subscriptionType: String?
-    }
+    static let ownService = "com.jorikschellekens.claudebar"
+    private static let claudeCodeService = "Claude Code-credentials"
 
-    private struct Envelope: Decodable {
-        let claudeAiOauth: OAuth
-    }
+    /// Long-lived tokens carry no expiry, so re-check occasionally in case the
+    /// user replaced one.
+    private static let opaqueTokenTTL: TimeInterval = 12 * 3600
+
+    /// Refresh a little before the real expiry to avoid racing a rotation.
+    private static let expiryMargin: TimeInterval = 120
 
     enum Failure: Error, LocalizedError {
         case notFound
@@ -35,14 +43,80 @@ enum Credentials {
         }
     }
 
-    static func load() throws -> OAuth {
-        if let data = try keychainData() {
-            return try decode(data)
+    private struct Cached {
+        let token: String
+        let goodUntil: Date
+    }
+
+    private static let lock = NSLock()
+    // Every access below is inside `lock`.
+    nonisolated(unsafe) private static var cached: Cached?
+
+    /// Drop the cache so the next call goes back to the source. Call this when
+    /// the API rejects the token.
+    static func invalidate() {
+        lock.lock()
+        cached = nil
+        lock.unlock()
+    }
+
+    static func token() throws -> String {
+        lock.lock()
+        if let c = cached, c.goodUntil > Date() {
+            lock.unlock()
+            return c.token
         }
-        if let data = fileData() {
-            return try decode(data)
+        lock.unlock()
+
+        let (token, goodUntil) = try resolve()
+
+        lock.lock()
+        cached = Cached(token: token, goodUntil: goodUntil)
+        lock.unlock()
+        return token
+    }
+
+    private static func resolve() throws -> (String, Date) {
+        // 1. Our own item - a bare token string, no envelope.
+        if let data = try? keychainData(service: ownService),
+           let raw = String(data: data, encoding: .utf8)?
+               .trimmingCharacters(in: .whitespacesAndNewlines),
+           !raw.isEmpty {
+            return (raw, Date().addingTimeInterval(opaqueTokenTTL))
         }
-        throw Failure.notFound
+
+        // 2. Credentials file.
+        if let data = fileData(), let oauth = try? decode(data) {
+            return (oauth.accessToken, expiry(of: oauth))
+        }
+
+        // 3. Claude Code's item. Let a denial surface - it is the one the user
+        //    can act on.
+        guard let data = try keychainData(service: claudeCodeService) else {
+            throw Failure.notFound
+        }
+        let oauth = try decode(data)
+        return (oauth.accessToken, expiry(of: oauth))
+    }
+
+    private static func expiry(of oauth: OAuth) -> Date {
+        guard let ms = oauth.expiresAt else {
+            return Date().addingTimeInterval(opaqueTokenTTL)
+        }
+        let real = Date(timeIntervalSince1970: ms / 1000)
+        return max(Date().addingTimeInterval(30), real.addingTimeInterval(-expiryMargin))
+    }
+
+    // MARK: - Decoding
+
+    struct OAuth: Decodable {
+        let accessToken: String
+        let expiresAt: Double?
+        let subscriptionType: String?
+    }
+
+    private struct Envelope: Decodable {
+        let claudeAiOauth: OAuth
     }
 
     private static func decode(_ data: Data) throws -> OAuth {
@@ -52,10 +126,12 @@ enum Credentials {
         return env.claudeAiOauth
     }
 
-    private static func keychainData() throws -> Data? {
+    // MARK: - Sources
+
+    private static func keychainData(service: String) throws -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "Claude Code-credentials",
+            kSecAttrService as String: service,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]

@@ -4,24 +4,20 @@ A small always-on-top bar pinned to the bottom of the macOS screen showing how
 much Claude usage you have left.
 
 ```
-  claude   5h ▰▰▰▰▱ 83% 23m   Week ▰▰▰▱▱ 68% 1d 21h   Fable ▰▰▰▰▱ 77% 1d 21h
+  claude used   5h ▰▱▱▱▱ 1% 3h 19m   Week ▰▰▱▱▱ 33% 1d 19h   Fable ▰▱▱▱▱ 23% 1d 19h
 ```
 
-Each meter is **remaining** percentage plus the countdown to when that window
-resets. Green above 30% left, amber below, red below 10%.
+Each meter is a percentage plus the countdown to when that window resets. It
+shows percent **used** by default, matching Claude Code's own `/usage`;
+right-click to switch to percent **left**. Colour always tracks headroom -
+green above 30% left, amber below, red below 10%.
 
 ## What it reads
 
 It calls `https://api.anthropic.com/api/oauth/usage` - the same endpoint
 Claude Code's `/usage` command uses - and renders the `limits` array it returns
 (the session window, the weekly all-model window, and any per-model weekly
-window). Auth is the OAuth token Claude Code already stores in your login
-keychain under the service `Claude Code-credentials`, falling back to
-`~/.claude/.credentials.json`.
-
-ClaudeBar never refreshes or rewrites that token; rotating it would pull it out
-from under Claude Code. If it expires, ClaudeBar shows `re-auth needed` and
-picks up the new token once Claude Code refreshes it.
+window).
 
 Polls once a minute, and again on wake from sleep.
 
@@ -29,21 +25,45 @@ Polls once a minute, and again on wake from sleep.
 
 ```sh
 ./install.sh
+./set-token.sh     # optional but recommended, see below
 ```
 
-That builds a release binary, packages `~/Applications/ClaudeBar.app`, and
-installs a LaunchAgent (`com.jorikschellekens.claudebar`) with `RunAtLoad` and
-`KeepAlive`, so it starts at login and restarts if it ever dies.
+`install.sh` builds a release binary, packages `~/Applications/ClaudeBar.app`,
+and installs a LaunchAgent (`com.jorikschellekens.claudebar`) with `RunAtLoad`
+and `KeepAlive`, so it starts at login and restarts if it ever dies.
 
-On first launch macOS asks for permission to read the Claude Code keychain
-item - choose **Always Allow**. The app is ad-hoc signed, so its code hash
-changes whenever you rebuild, and macOS will ask again after a reinstall.
+## Auth, and how to stop the keychain prompts
+
+With no setup, ClaudeBar borrows the OAuth token Claude Code keeps in your
+login keychain under `Claude Code-credentials`. That works immediately, but
+Claude Code rotates the token about hourly and rewrites the keychain item each
+time, which resets the item's ACL - so macOS keeps asking for permission no
+matter how often you click *Always Allow*.
+
+To stop that for good, give ClaudeBar a token of its own:
+
+```sh
+claude setup-token     # prints a long-lived token
+./set-token.sh         # paste it in
+```
+
+`set-token.sh` verifies the token against the usage endpoint, then stores it in
+a keychain item that ClaudeBar itself is on the ACL of, so reading it never
+prompts. Claude Code's own credentials are left completely alone.
+
+The token is resolved in that order - ClaudeBar's own item, then
+`~/.claude/.credentials.json`, then Claude Code's item - and cached in memory
+until it expires, so a 60-second poll is not a 60-second keychain hit. On a
+401 the cache is dropped and the source re-read once.
+
+ClaudeBar never refreshes or rewrites Claude Code's token; rotating it would
+pull it out from under Claude Code.
 
 ## Using it
 
 - **Drag** the pill anywhere; the position is remembered.
 - **Click** it to refresh immediately.
-- **Right-click** for Refresh / Reset position / Quit.
+- **Right-click** to switch used/left, refresh, reset position, or quit.
 
 It lives on every space and floats over full-screen apps. It sits above the
 Dock by default (it is positioned in the screen's visible frame).
