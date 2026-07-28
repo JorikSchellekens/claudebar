@@ -4,13 +4,19 @@ A small always-on-top bar pinned to the bottom of the macOS screen showing how
 much Claude usage you have left.
 
 ```
-  claude used   5h ▰▱▱▱▱ 1% 3h 19m   Week ▰▰▱▱▱ 33% 1d 19h   Fable ▰▱▱▱▱ 23% 1d 19h
+  claude   5h ▰▱▱▱▱ 1% 3h 19m   Week ▰▰▱▱▱ 33% 1d 19h   Fable ▰▱▱▱▱ 23% 1d 19h
 ```
 
-Each meter is a percentage plus the countdown to when that window resets. It
-shows percent **used** by default, matching Claude Code's own `/usage`;
-right-click to switch to percent **left**. Colour always tracks headroom -
-green above 30% left, amber below, red below 10%.
+Each meter is a percentage plus how long until that window resets. It shows
+percent **used** by default, matching Claude Code's own `/usage`; right-click
+to switch to percent **left**. Colour always tracks headroom - green above 30%
+left, amber below, red below 10%.
+
+The pill sits at 40% opacity while everything is under 50% used and fades up to
+full by 80%, so it recedes when there is nothing to say. Hovering restores it.
+
+It also posts a notification the first time a window crosses 80%, and again at
+95%, re-arming when that window resets.
 
 ## What it reads
 
@@ -19,7 +25,20 @@ Claude Code's `/usage` command uses - and renders the `limits` array it returns
 (the session window, the weekly all-model window, and any per-model weekly
 window).
 
-Polls once a minute, and again on wake from sleep.
+## Polling
+
+Every 5 minutes, and again on wake from sleep. That endpoint rate-limits, and
+the windows it reports are measured in hours and days, so polling harder only
+earns 429s.
+
+On a failed poll it keeps the last good numbers on screen rather than blanking,
+and backs off exponentially (honouring `Retry-After`) up to 30 minutes. The
+`claude` label turns amber once the numbers are stale enough to distrust; hover
+it for the last-updated time and the reason the last poll failed.
+
+The last reading is cached to disk and reused on launch if it is younger than
+the poll interval, so restarting - or a run of reinstalls - does not spend a
+request every time.
 
 ## Install
 
@@ -62,11 +81,15 @@ pull it out from under Claude Code.
 ## Using it
 
 - **Drag** the pill anywhere; the position is remembered.
-- **Click** it to refresh immediately.
+- **Double-click** to send it back to bottom centre.
+- **Click** to refresh, unless the numbers are already less than 30s old.
 - **Right-click** to switch used/left, refresh, reset position, or quit.
 
-It lives on every space and floats over full-screen apps. It sits above the
-Dock by default (it is positioned in the screen's visible frame).
+It lives on every space and floats over full-screen apps, and sits above the
+Dock by default (it is positioned in the screen's visible frame). Position is
+stored as a fraction of the visible frame rather than absolute pixels, so it
+follows the display your mouse is on and lands in the same relative spot on
+screens of different sizes.
 
 ## Uninstall
 
@@ -86,6 +109,7 @@ Dock by default (it is positioned in the screen's visible frame).
 | Path | |
 |---|---|
 | `Sources/ClaudeBar/main.swift` | the `NSPanel` overlay, placement, LaunchAgent-friendly lifecycle |
-| `Sources/ClaudeBar/BarView.swift` | SwiftUI meters, polling store |
+| `Sources/ClaudeBar/BarView.swift` | SwiftUI meters, polling store, backoff and caching |
 | `Sources/ClaudeBar/UsageClient.swift` | the usage request and `limits` parsing |
 | `Sources/ClaudeBar/Credentials.swift` | keychain / credentials-file token read |
+| `Sources/ClaudeBar/Notifier.swift` | 80% / 95% threshold notifications |
