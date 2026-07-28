@@ -14,8 +14,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let notifier = Notifier()
     private var panel: BarPanel!
 
-    private var lastMoveAt: Date?
-    private var mouseUpMonitors: [Any] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let hosting = NSHostingView(rootView: BarView(store: store))
@@ -52,19 +50,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self, selector: #selector(woke),
             name: NSWorkspace.didWakeNotification, object: nil)
 
-        // Snap after a drag ends. Mouse-up needs both monitors: the global one
-        // misses events delivered to our own window, the local one misses the
-        // rest.
-        let global = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] _ in
-            Task { @MainActor in self?.snapIfJustDragged() }
-        }
-        let local = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] event in
-            Task { @MainActor in self?.snapIfJustDragged() }
-            return event
-        }
-        mouseUpMonitors = [global, local].compactMap { $0 }
-
         notifier.prepare()
+        store.onResetPosition = { [weak self] in
+            self?.resetPositionAnimated()
+        }
         store.onUsage = { [weak self] usage in
             self?.notifier.evaluate(usage)
         }
@@ -137,8 +126,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let yOffsetKey = "posYOffset"
 
     private let bottomMargin: CGFloat = 6
-    private let snapX: CGFloat = 60
-    private let snapY: CGFloat = 44
 
     private func currentScreen() -> NSScreen? {
         let mouse = NSEvent.mouseLocation
@@ -175,25 +162,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         placeWindow(on: target)
     }
 
-    /// Magnetic pull back to bottom centre, so a nudged bar is easy to re-seat.
-    private func snapIfJustDragged() {
-        guard let moved = lastMoveAt, Date().timeIntervalSince(moved) < 1 else { return }
-        lastMoveAt = nil
-        guard let screen = panel.screen ?? currentScreen() else { return }
-
+    /// Double-clicking the bar sends it home. A magnetic snap was too easy to
+    /// miss and gave no hint it existed.
+    @objc private func resetPositionAnimated() {
+        UserDefaults.standard.removeObject(forKey: xFractionKey)
+        UserDefaults.standard.removeObject(forKey: yOffsetKey)
+        guard let screen = currentScreen() else { return }
         let v = screen.visibleFrame
-        let size = panel.frame.size
-        var origin = panel.frame.origin
-
-        let centreX = v.midX - size.width / 2
-        if abs(origin.x - centreX) < snapX { origin.x = centreX }
-
-        let restY = v.minY + bottomMargin
-        if abs(origin.y - restY) < snapY { origin.y = restY }
-
-        guard origin != panel.frame.origin else { return }
-        panel.animator().setFrameOrigin(origin)
-        savePosition(origin: origin, screen: screen)
+        let target = NSPoint(x: v.midX - panel.frame.width / 2, y: v.minY + bottomMargin)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.22
+            panel.animator().setFrameOrigin(target)
+        }
     }
 
     private func clampToScreen() {
@@ -214,7 +194,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func windowDidMove(_ notification: Notification) {
-        lastMoveAt = Date()
         guard let screen = panel.screen else { return }
         savePosition(origin: panel.frame.origin, screen: screen)
     }

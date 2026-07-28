@@ -36,6 +36,16 @@ final class UsageStore: ObservableObject {
     /// at the same data the bar just rendered.
     var onUsage: ((Usage) -> Void)?
 
+    /// Double-click sends the bar back to bottom centre.
+    var onResetPosition: (() -> Void)?
+
+    /// A click asks for fresh data, but the endpoint rate-limits, so ignore
+    /// clicks that land on numbers which are already current.
+    func manualRefresh() {
+        if let usage, Date().timeIntervalSince(usage.fetchedAt) < 30 { return }
+        refresh()
+    }
+
     private var timer: Timer?
 
     /// The windows are measured in hours and days, and the endpoint rate-limits,
@@ -50,8 +60,15 @@ final class UsageStore: ObservableObject {
         return Date().timeIntervalSince(usage.fetchedAt) > interval * 3
     }
 
+    /// Don't spend a request just because the app restarted. A cached reading
+    /// younger than the poll interval is good enough to open with, which keeps
+    /// a crash loop or a run of reinstalls from burning the endpoint's quota.
     func start() {
-        refresh()
+        if let usage, Date().timeIntervalSince(usage.fetchedAt) < interval {
+            scheduleNext(interval - Date().timeIntervalSince(usage.fetchedAt))
+        } else {
+            refresh()
+        }
     }
 
     func refresh() {
@@ -218,6 +235,9 @@ struct BarView: View {
         .animation(.easeInOut(duration: 0.35), value: restingOpacity)
         .onReceive(tick) { now = $0 }
         .onHover { hovering = $0 }
-        .onTapGesture { store.refresh() }
+        // Double-click must be declared first, or the single-click gesture
+        // swallows it.
+        .onTapGesture(count: 2) { store.onResetPosition?() }
+        .onTapGesture { store.manualRefresh() }
     }
 }
