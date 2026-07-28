@@ -1,12 +1,10 @@
 import SwiftUI
 
-/// Claude Code's own `/usage` reports percent *used*. Showing percent *left*
-/// next to it reads as a mismatch even though it is the same number, so the
-/// mode is explicit in the UI and switchable from the right-click menu.
+/// Percent used, matching Claude Code's own `/usage`. Switchable to percent
+/// left from the right-click menu; the tooltip always states both.
 enum DisplayMode: String {
     case left, used
 
-    var suffix: String { rawValue }
     var toggled: DisplayMode { self == .left ? .used : .left }
 }
 
@@ -129,7 +127,7 @@ struct BarView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Text("claude \(store.mode.suffix)")
+            Text("claude")
                 .font(.system(size: 10, weight: .bold, design: .rounded))
                 .foregroundStyle(.secondary)
                 .opacity(store.loading ? 0.45 : 1)
