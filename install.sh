@@ -24,8 +24,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/ClaudeBar"
 cp "$REPO/Resources/Info.plist" "$APP/Contents/Info.plist"
 
-# Ad-hoc signature. Rebuilding changes the code hash, so macOS will ask for
-# keychain access again after each reinstall - click "Always Allow".
+# Ad-hoc signature, which changes the code hash on every build. That is what
+# invalidates the keychain's "Always Allow", so expect one authorization prompt
+# after each reinstall - and none in between. Reinstall only when you mean to.
 codesign --force --sign - --identifier "$LABEL" "$APP"
 
 echo "==> writing $PLIST"

@@ -44,39 +44,39 @@ request every time.
 
 ```sh
 ./install.sh
-./set-token.sh     # optional but recommended, see below
 ```
 
 `install.sh` builds a release binary, packages `~/Applications/ClaudeBar.app`,
 and installs a LaunchAgent (`com.jorikschellekens.claudebar`) with `RunAtLoad`
 and `KeepAlive`, so it starts at login and restarts if it ever dies.
 
-## Auth, and how to stop the keychain prompts
+## Auth, and the one keychain prompt
 
-With no setup, ClaudeBar borrows the OAuth token Claude Code keeps in your
-login keychain under `Claude Code-credentials`. That works immediately, but
-Claude Code rotates the token about hourly and rewrites the keychain item each
-time, which resets the item's ACL - so macOS keeps asking for permission no
-matter how often you click *Always Allow*.
+ClaudeBar reads the OAuth token Claude Code keeps in your login keychain under
+`Claude Code-credentials`. The first time it does, macOS asks for authorization.
+**Click "Always Allow" and it stops asking.**
 
-To stop that for good, give ClaudeBar a token of its own:
+That token is the only one the usage endpoint accepts, and Claude Code keeps it
+fresh, so there is nothing to set up and nothing to rotate by hand.
 
-```sh
-claude setup-token     # prints a long-lived token
-./set-token.sh         # paste it in
-```
+The prompt comes back after a reinstall, and only then: `install.sh` re-signs
+the app ad-hoc, which changes its code hash, and the access you granted was tied
+to the old hash. Claude Code's own hourly token refresh does *not* bring it back
+- it writes with `security add-generic-password -U`, which preserves the item's
+ACL. So: one click per reinstall, none in between.
 
-`set-token.sh` verifies the token against the usage endpoint, then stores it in
-a keychain item that ClaudeBar itself is on the ACL of, so reading it never
-prompts. Claude Code's own credentials are left completely alone.
-
-The token is resolved in that order - ClaudeBar's own item, then
-`~/.claude/.credentials.json`, then Claude Code's item - and cached in memory
-until it expires, so a 60-second poll is not a 60-second keychain hit. On a
-401 the cache is dropped and the source re-read once.
+Sources are tried in order - `CLAUDEBAR_TOKEN` in the environment, then
+`~/.config/claudebar/token`, then `~/.claude/.credentials.json`, then the
+keychain - and the result is cached in memory until it expires, so a 60-second
+poll is not a 60-second keychain hit. On a 401 the cache is dropped and the
+source re-read once.
 
 ClaudeBar never refreshes or rewrites Claude Code's token; rotating it would
 pull it out from under Claude Code.
+
+The file sources come first and never prompt, so if you have a token the usage
+endpoint accepts, putting it in `~/.config/claudebar/token` (mode `600`) takes
+the keychain out of the picture entirely.
 
 ## Using it
 
@@ -111,5 +111,5 @@ screens of different sizes.
 | `Sources/ClaudeBar/main.swift` | the `NSPanel` overlay, placement, LaunchAgent-friendly lifecycle |
 | `Sources/ClaudeBar/BarView.swift` | SwiftUI meters, polling store, backoff and caching |
 | `Sources/ClaudeBar/UsageClient.swift` | the usage request and `limits` parsing |
-| `Sources/ClaudeBar/Credentials.swift` | keychain / credentials-file token read |
+| `Sources/ClaudeBar/Credentials.swift` | token file read, with in-memory caching |
 | `Sources/ClaudeBar/Notifier.swift` | 80% / 95% threshold notifications |

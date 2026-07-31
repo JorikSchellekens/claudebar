@@ -3,24 +3,35 @@ import Security
 
 /// Supplies the bearer token for the usage endpoint.
 ///
-/// Source order, cheapest and least intrusive first:
+/// Source order:
 ///
-///  1. ClaudeBar's own keychain item. Written by `set-token.sh` from
-///     `claude setup-token`, with ClaudeBar on its ACL, so reading it never
-///     prompts. This is the only source that stays quiet indefinitely.
-///  2. `~/.claude/.credentials.json`, if a non-keychain install wrote one.
-///  3. Claude Code's own keychain item. This works with no setup, but Claude
-///     Code rotates that token about hourly and rewrites the item each time,
-///     which resets its ACL and makes macOS ask again.
+///  1. `CLAUDEBAR_TOKEN` in the environment, for one-off runs from a shell.
+///  2. `~/.config/claudebar/token` - a bare token on one line, if you have one
+///     that the usage endpoint accepts. Reading it never prompts.
+///  3. `~/.claude/.credentials.json`, on installs that keep credentials in a
+///     file rather than the keychain.
+///  4. Claude Code's keychain item. This is the one that actually works: it is
+///     the only token the usage endpoint accepts, and Claude Code keeps it
+///     fresh.
+///
+/// macOS asks for authorization the first time ClaudeBar reads that item.
+/// Click "Always Allow" and it stops asking - Claude Code's hourly refresh
+/// writes with `security add-generic-password -U`, which preserves the item's
+/// ACL, so rotation alone does not bring the prompt back.
+///
+/// What does bring it back is rebuilding ClaudeBar: `install.sh` re-signs
+/// ad-hoc, the code hash changes, and the granted access no longer matches the
+/// binary. So expect one prompt per reinstall, and none in between.
 ///
 /// Whatever the source, the result is cached in memory until it expires, so a
-/// 60-second poll does not mean a 60-second keychain hit.
+/// 60-second poll does not mean a 60-second disk hit.
 ///
 /// ClaudeBar never refreshes or rewrites Claude Code's token - rotating it
 /// would pull it out from under Claude Code.
 enum Credentials {
-    static let ownService = "com.jorikschellekens.claudebar"
-    private static let claudeCodeService = "Claude Code-credentials"
+    /// A bare token on one line, if you choose to place one here.
+    static let tokenPath = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".config/claudebar/token")
 
     /// Long-lived tokens carry no expiry, so re-check occasionally in case the
     /// user replaced one.
@@ -28,6 +39,8 @@ enum Credentials {
 
     /// Refresh a little before the real expiry to avoid racing a rotation.
     private static let expiryMargin: TimeInterval = 120
+
+    private static let claudeCodeService = "Claude Code-credentials"
 
     enum Failure: Error, LocalizedError {
         case notFound
@@ -77,26 +90,36 @@ enum Credentials {
     }
 
     private static func resolve() throws -> (String, Date) {
-        // 1. Our own item - a bare token string, no envelope.
-        if let data = try? keychainData(service: ownService),
-           let raw = String(data: data, encoding: .utf8)?
-               .trimmingCharacters(in: .whitespacesAndNewlines),
+        // 1. Environment.
+        if let raw = ProcessInfo.processInfo.environment["CLAUDEBAR_TOKEN"].map(clean),
            !raw.isEmpty {
             return (raw, Date().addingTimeInterval(opaqueTokenTTL))
         }
 
-        // 2. Credentials file.
-        if let data = fileData(), let oauth = try? decode(data) {
+        // 2. Our own token file - a bare token, no envelope.
+        if let text = try? String(contentsOf: tokenPath, encoding: .utf8) {
+            let raw = clean(text)
+            if !raw.isEmpty {
+                return (raw, Date().addingTimeInterval(opaqueTokenTTL))
+            }
+        }
+
+        // 3. Claude Code's credentials file, where there is one.
+        if let data = credentialsFileData(), let oauth = try? decode(data) {
             return (oauth.accessToken, expiry(of: oauth))
         }
 
-        // 3. Claude Code's item. Let a denial surface - it is the one the user
-        //    can act on.
+        // 4. Claude Code's keychain item. Let a denial surface - it is the one
+        //    the user can act on.
         guard let data = try keychainData(service: claudeCodeService) else {
             throw Failure.notFound
         }
         let oauth = try decode(data)
         return (oauth.accessToken, expiry(of: oauth))
+    }
+
+    private static func clean(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func expiry(of oauth: OAuth) -> Date {
@@ -147,7 +170,7 @@ enum Credentials {
         }
     }
 
-    private static func fileData() -> Data? {
+    private static func credentialsFileData() -> Data? {
         let path = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/.credentials.json")
         return try? Data(contentsOf: path)
