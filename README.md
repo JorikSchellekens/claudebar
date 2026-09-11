@@ -12,6 +12,36 @@ percent **used** by default, matching Claude Code's own `/usage`; right-click
 to switch to percent **left**. Colour always tracks headroom - green above 30%
 left, amber below, red below 10%.
 
+## Pace
+
+Each meter carries a notch: where the fill edge would sit if that window were
+being spent evenly. Fill short of the notch means you are under budget for how
+far into the window you are. Past it means you are burning faster than the
+clock, and the stretch between the notch and the fill edge - the overspend -
+is painted one step warmer than the meter itself, amber on a green bar and red
+on an amber one. On a bar that is already red it is left alone; there is no
+worse colour to go to, and the notch says it anyway.
+
+In percent-**left** mode the bar and the notch both mirror, so the overspend
+becomes a gap rather than a stretch of fill - headroom you should still have
+and do not. It is painted faintly there, because a solid block of colour in
+the empty part of the bar would read as spend.
+
+Hover a meter for the numbers - how much of the window has gone, how much of
+the allowance, and where the current rate lands you at reset.
+
+The API gives a percent and a reset time but never says how long the window is,
+and without that there is nothing to pace against. The length is measured
+instead: time-to-reset is largest the instant a window opens, so the largest
+value ever seen for a window *is* its length, converging from below and never
+overshooting. Until one has been observed, the product's own windows are used -
+5 hours for the session, 7 days for the weekly ones. Measuring off the jump in
+`resets_at` would be wrong: a session window starts at your first message after
+the last lapsed, so that gap is the window plus however long you were idle.
+
+The notch is hidden in the first 3% of a window, where it would sit on the end
+cap and say nothing. Right-click to turn it off entirely.
+
 The pill sits at 40% opacity while everything is under 50% used and fades up to
 full by 80%, so it recedes when there is nothing to say. Hovering restores it.
 
@@ -83,7 +113,8 @@ the keychain out of the picture entirely.
 - **Drag** the pill anywhere; the position is remembered.
 - **Double-click** to send it back to bottom centre.
 - **Click** to refresh, unless the numbers are already less than 30s old.
-- **Right-click** to switch used/left, refresh, reset position, or quit.
+- **Right-click** to switch used/left, toggle the pace notch, refresh, reset
+  position, or quit.
 
 It lives on every space and floats over full-screen apps, and sits above the
 Dock by default (it is positioned in the screen's visible frame). Position is
@@ -110,6 +141,7 @@ screens of different sizes.
 |---|---|
 | `Sources/ClaudeBar/main.swift` | the `NSPanel` overlay, placement, LaunchAgent-friendly lifecycle |
 | `Sources/ClaudeBar/BarView.swift` | SwiftUI meters, polling store, backoff and caching |
+| `Sources/ClaudeBar/Pace.swift` | window-length learning and the even-burn comparison |
 | `Sources/ClaudeBar/UsageClient.swift` | the usage request and `limits` parsing |
 | `Sources/ClaudeBar/Credentials.swift` | token file read, with in-memory caching |
 | `Sources/ClaudeBar/Notifier.swift` | 80% / 95% threshold notifications |

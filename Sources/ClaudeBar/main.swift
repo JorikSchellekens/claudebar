@@ -122,6 +122,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         menu.delegate = self
         menu.addItem(withTitle: "Show percent used", action: #selector(toggleMode), keyEquivalent: "")
             .target = self
+        menu.addItem(withTitle: "Pace marker", action: #selector(togglePace), keyEquivalent: "")
+            .target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Refresh now", action: #selector(refresh), keyEquivalent: "r")
             .target = self
@@ -137,9 +139,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         resizeToFit()
     }
 
-    /// Keep the toggle's title describing what it will switch *to*.
+    @objc private func togglePace() {
+        store.showPace.toggle()
+        resizeToFit()
+    }
+
+    /// Keep the toggle's title describing what it will switch *to*, and the
+    /// pace item showing whether it is on.
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.item(at: 0)?.title = store.mode == .left ? "Show percent used" : "Show percent left"
+        menu.item(at: 1)?.state = store.showPace ? .on : .off
     }
 
     @objc private func refresh() { store.refresh() }

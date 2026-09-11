@@ -16,6 +16,12 @@ final class UsageStore: ObservableObject {
     @Published var mode: DisplayMode = .used {
         didSet { UserDefaults.standard.set(mode.rawValue, forKey: "displayMode") }
     }
+    /// The pace marker is on by default; it costs no width, only a hairline.
+    @Published var showPace = true {
+        didSet { UserDefaults.standard.set(showPace, forKey: "showPace") }
+    }
+
+    let spans = WindowSpans()
 
     private let cacheKey = "lastUsage"
 
@@ -24,11 +30,15 @@ final class UsageStore: ObservableObject {
            let m = DisplayMode(rawValue: raw) {
             mode = m
         }
+        if UserDefaults.standard.object(forKey: "showPace") != nil {
+            showPace = UserDefaults.standard.bool(forKey: "showPace")
+        }
         // Show the last known numbers immediately rather than an empty bar,
         // which matters most on a restart into a rate limit.
         if let data = UserDefaults.standard.data(forKey: cacheKey),
            let cached = try? JSONDecoder().decode(Usage.self, from: data) {
             usage = cached
+            spans.learn(cached)
         }
     }
 
@@ -78,6 +88,7 @@ final class UsageStore: ObservableObject {
             do {
                 let fresh = try await UsageClient.fetch()
                 usage = fresh
+                spans.learn(fresh)
                 errorText = nil
                 backoff = interval
                 if let data = try? JSONEncoder().encode(fresh) {
@@ -125,51 +136,157 @@ func meterColor(remaining: Int) -> Color {
     }
 }
 
+/// The stretch between the fill edge and the pace mark, when that stretch is
+/// overspend: one step worse than the meter's own colour, so it warns without
+/// inventing a fourth hue.
+///
+/// Nil once the bar is already red, where there is no worse step to take. A
+/// lighter red would have been the only room left, and on a nearly-spent
+/// window that stretch is most of the bar - so the meter would have gone
+/// *paler* exactly when it matters most. The notch alone carries it there.
+func paceOverColor(remaining: Int) -> Color? {
+    switch remaining {
+    case ..<10: return nil
+    case ..<30: return Color(red: 0.95, green: 0.31, blue: 0.31)
+    default: return Color(red: 0.97, green: 0.68, blue: 0.20)
+    }
+}
+
 struct MeterView: View {
     let limit: Limit
     let mode: DisplayMode
     /// Ticks once a second so the countdown stays honest.
     let now: Date
+    /// Where the fill edge would be if this window were spent evenly. Nil when
+    /// the limit has no reset time, or when the marker is switched off.
+    let pace: Pace?
 
     /// The number shown. The bar always fills in the same direction as it.
     private var value: Int { mode == .left ? limit.remaining : limit.percent }
 
     private var color: Color { meterColor(remaining: limit.remaining) }
 
+    private static let barWidth: CGFloat = 46
+    private static let barHeight: CGFloat = 6
+
+    /// x of the fill edge, and of the pace mark, in bar coordinates.
+    private var fillX: CGFloat { Self.barWidth * CGFloat(min(max(value, 0), 100)) / 100 }
+    private var markX: CGFloat? {
+        // In the first sliver of a window the mark says nothing - and it would
+        // land on the end cap, where it just eats the fill.
+        guard let pace, pace.elapsed >= 0.03 else { return nil }
+        return Self.barWidth * CGFloat(pace.markerFraction(mode: mode))
+    }
+
+    /// The gap between the two, when the fill edge is on the wrong side of the
+    /// mark. Overspend shows as filled bar past the mark in "used" mode and as
+    /// a shortfall of bar before it in "left" mode; either way it is the same
+    /// interval, so one span covers both.
+    private var overSpan: (x: CGFloat, width: CGFloat)? {
+        guard let pace, pace.deltaPoints > 0, let markX else { return nil }
+        let lo = min(fillX, markX), hi = max(fillX, markX)
+        guard hi - lo >= 1 else { return nil }
+        return (lo, hi - lo)
+    }
+
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             Text(limit.label)
                 .font(.system(size: 10, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
 
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(Color.primary.opacity(0.14))
-                Capsule()
-                    .fill(color)
-                    .frame(width: max(2, 46 * CGFloat(value) / 100))
-            }
-            .frame(width: 46, height: 5)
+            meter
 
             Text("\(value)%")
                 .font(.system(size: 11, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(color)
+                // Fixed field: the numbers change every poll, and without this
+                // every meter to the right of one shifts when 9% becomes 10%.
+                .lineLimit(1)
+                .frame(width: 33, alignment: .trailing)
 
             if let r = limit.resetsAt {
                 Text(countdown(to: r, now: now))
                     .font(.system(size: 10, design: .rounded))
                     .monospacedDigit()
+                    .lineLimit(1)
                     .foregroundStyle(.tertiary)
+                    .frame(width: 42, alignment: .leading)
             }
         }
         .help(tooltip)
+    }
+
+    private var meter: some View {
+        ZStack(alignment: .leading) {
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.primary.opacity(0.16))
+                Capsule()
+                    .fill(color)
+                    .frame(width: max(4, fillX))
+                if let overSpan, let overColor = paceOverColor(remaining: limit.remaining) {
+                    // In "used" mode this stretch is bar you have actually
+                    // burnt, so it is painted solid. In "left" mode it is
+                    // headroom you should still have and do not - a ghost of
+                    // the shortfall, and painting it solid would read as spend.
+                    Rectangle()
+                        .fill(overColor)
+                        .opacity(mode == .used ? 1 : 0.32)
+                        .frame(width: overSpan.width)
+                        .offset(x: overSpan.x)
+                }
+                if let markX {
+                    // Punched out rather than painted over, so the notch is the
+                    // pill's own material and reads the same against track,
+                    // fill, and overspend alike, in either appearance.
+                    Capsule()
+                        .fill(Color.black)
+                        .frame(width: 3, height: Self.barHeight)
+                        .offset(x: notch(markX))
+                        .blendMode(.destinationOut)
+                }
+            }
+            .frame(width: Self.barWidth, height: Self.barHeight)
+            .compositingGroup()
+            .clipShape(Capsule())
+
+            if let markX {
+                Capsule()
+                    .fill(Color.primary.opacity(0.42))
+                    .frame(width: 1, height: Self.barHeight + 3)
+                    .offset(x: notch(markX) + 1)
+            }
+        }
+        .frame(width: Self.barWidth, height: Self.barHeight)
+    }
+
+    /// Keep the notch clear of both end caps, where a capsule has no width to
+    /// spare and the mark would just chew a corner off.
+    private func notch(_ x: CGFloat) -> CGFloat {
+        min(max(x - 1.5, 2), Self.barWidth - 5)
     }
 
     private var tooltip: String {
         var s = "\(limit.label): \(limit.remaining)% left, \(limit.percent)% used"
         if let r = limit.resetsAt {
             s += ", resets \(r.formatted(date: .abbreviated, time: .shortened))"
+        }
+        if let pace {
+            let elapsed = Int((pace.elapsed * 100).rounded())
+            let delta = Int(pace.deltaPoints.rounded())
+            s += "\n\(elapsed)% of the window gone, \(limit.percent)% of it spent"
+            if delta > 0 {
+                s += " - \(delta) points ahead of an even burn"
+            } else if delta < 0 {
+                s += " - \(-delta) points behind an even burn"
+            } else {
+                s += " - exactly on an even burn"
+            }
+            if let projected = pace.projected {
+                s += "\nat this rate: \(Int(projected.rounded()))% by reset"
+            }
         }
         return s
     }
@@ -205,9 +322,10 @@ struct BarView: View {
     }
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 14) {
             Text("claude")
                 .font(.system(size: 10, weight: .bold, design: .rounded))
+                .kerning(0.2)
                 .foregroundStyle(store.stale ? Color(red: 0.97, green: 0.68, blue: 0.20) : .secondary)
                 .opacity(store.loading ? 0.45 : 1)
                 .help(staleHelp)
@@ -216,7 +334,12 @@ struct BarView: View {
                 // Last good numbers stay up through a failed poll; the label
                 // turns amber once they are old enough to distrust.
                 ForEach(usage.limits) { limit in
-                    MeterView(limit: limit, mode: store.mode, now: now)
+                    MeterView(
+                        limit: limit,
+                        mode: store.mode,
+                        now: now,
+                        pace: store.showPace ? store.spans.pace(for: limit, now: now) : nil
+                    )
                 }
             } else if let err = store.errorText {
                 Text(err)
@@ -228,7 +351,9 @@ struct BarView: View {
                     .foregroundStyle(.tertiary)
             }
         }
-        .padding(.horizontal, 12)
+        // A capsule eats its own corners, so the end caps need more room than
+        // a rectangle would.
+        .padding(.horizontal, 14)
         .padding(.vertical, 6)
         .background(.ultraThinMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(Color.primary.opacity(0.10), lineWidth: 1))
