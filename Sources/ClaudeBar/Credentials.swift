@@ -104,8 +104,10 @@ enum Credentials {
             }
         }
 
-        // 3. Claude Code's credentials file, where there is one.
-        if let data = credentialsFileData(), let oauth = try? decode(data) {
+        // 3. Claude Code's credentials file, where there is one. Claude Code can
+        //    move to the keychain and leave this file behind, never refreshed,
+        //    so an expired token here must not shadow the live one below.
+        if let data = credentialsFileData(), let oauth = try? decode(data), !isExpired(oauth) {
             return (oauth.accessToken, expiry(of: oauth))
         }
 
@@ -120,6 +122,11 @@ enum Credentials {
 
     private static func clean(_ s: String) -> String {
         s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func isExpired(_ oauth: OAuth) -> Bool {
+        guard let ms = oauth.expiresAt else { return false }
+        return Date(timeIntervalSince1970: ms / 1000) <= Date()
     }
 
     private static func expiry(of oauth: OAuth) -> Date {
